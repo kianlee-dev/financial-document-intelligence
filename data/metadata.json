@@ -1,0 +1,27 @@
+{
+  "AAPL_2025_10K.pdf": {
+    "company_name": "Apple",
+    "report_year": 2025,
+    "document_type": "10-K"
+  },
+  "JPMC_2025_AR.pdf": {
+    "company_name": "JPMorgan Chase",
+    "report_year": 2025,
+    "document_type": "Annual Report"
+  },
+  "HSBC_2025_AR.pdf": {
+    "company_name": "HSBC",
+    "report_year": 2025,
+    "document_type": "Annual Report"
+  },
+  "AIA_2025_AR.pdf": {
+    "company_name": "AIA Group",
+    "report_year": 2025,
+    "document_type": "Annual Report"
+  },
+  "SONY_2025_AR.pdf": {
+    "company_name": "Sony",
+    "report_year": 2025,
+    "document_type": "Annual Report"
+  }
+}
