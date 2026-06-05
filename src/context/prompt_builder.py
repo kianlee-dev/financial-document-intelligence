@@ -1,5 +1,6 @@
 """Prompt assembly — system prompt, chunk formatting, query construction."""
 
+from langfuse import observe
 from langchain_core.documents import Document
 
 def get_system_prompt() -> str:
@@ -12,6 +13,7 @@ def get_system_prompt() -> str:
         "information to answer, say so — do not make up data."
     )
 
+@observe()
 def get_prompt(query: str, chunks: list[Document]) -> str:
     """Assemble context chunks and query into a formatted prompt."""
     context_parts = []

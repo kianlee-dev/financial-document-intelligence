@@ -1,12 +1,14 @@
 """Claude API wrapper — handles LLM calls."""
 
 from anthropic import Anthropic
+from langfuse import observe
 
 class LLMClient:
     def __init__(self, model: str = "claude-sonnet-4-6"):
         self.client = Anthropic()
         self.model = model
 
+    @observe()
     def generate(self, prompt: str,  system_prompt: str = "") -> str:
         """Send prompt to LLM API, return response text."""
         response = self.client.messages.create(model= self.model,

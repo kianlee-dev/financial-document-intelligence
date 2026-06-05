@@ -1,7 +1,9 @@
 """ChromaDB storage and similarity search."""
+
 from pathlib import Path
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from langfuse import observe
 from src.retrieval.embeddings import EmbeddingService
 
 class VectorStore:
@@ -18,6 +20,7 @@ class VectorStore:
         """Add chunks to the vector store"""
         self.store.add_documents(chunks)
 
+    @observe()
     def search(self, query: str, k: int = 3, filters: dict = None) -> list[Document]:
         """Search for similar chunks and optional metadata filtering"""
         search_kwargs = {"k": k}
