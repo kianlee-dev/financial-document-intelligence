@@ -13,9 +13,8 @@ def get_system_prompt() -> str:
         "information to answer, say so — do not make up data."
     )
 
-@observe()
-def get_prompt(query: str, chunks: list[Document]) -> str:
-    """Assemble context chunks and query into a formatted prompt."""
+def format_chunks_with_sources(chunks: list[Document]) -> str:
+    """Format chunks with [Source: company, type, year, Page N] labels."""
     context_parts = []
     for chunk in chunks:
         header = (
@@ -25,6 +24,12 @@ def get_prompt(query: str, chunks: list[Document]) -> str:
             f"Page {chunk.metadata['page']}]"
         )
         context_parts.append(f"{header}\n{chunk.page_content}")
-    
-    context = "\n\n".join(context_parts)
+
+    return "\n\n".join(context_parts)
+
+
+@observe()
+def get_prompt(query: str, chunks: list[Document]) -> str:
+    """Assemble context chunks and query into a formatted prompt."""
+    context = format_chunks_with_sources(chunks)
     return f"Context:\n{context}\n\nQuestion: {query}"
