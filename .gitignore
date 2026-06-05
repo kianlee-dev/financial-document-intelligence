@@ -4,3 +4,5 @@ __pycache__/
 !data/metadata.json
 .DS_Store
 chroma_db/
+.ralph/
+.claude/
