@@ -55,8 +55,8 @@ def get_documents_list() -> list[dict]:
         return []
     # deduplicate with set of tuples
     unique = {(m["company_name"], m["report_year"], m["document_type"]) for m in metadatas}
-    # unpacks
-    return [{"company_name": c, "report_year": y, "document_type": t} for c, y, t in unique]
+    # unpacks and sort
+    return sorted([{"company_name": c, "report_year": y, "document_type": t} for c, y, t in unique],key=lambda d: d["company_name"])
 
 @observe()
 def get_metadata() -> str:

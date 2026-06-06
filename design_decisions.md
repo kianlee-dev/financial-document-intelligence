@@ -71,7 +71,7 @@
 
 **Design Decision:** Standard — source filename, page number, company name, report year, document type
 
-**Reasoning:** Agent needs filtered retrieval by company name and must cite source file, date, and page number. A metadata config file (`metadata.json`) maps each document to its company name, year, and document type. pypdf provides page numbers during extraction. Config-based approach is more robust than filename parsing for real-world documents with inconsistent naming.
+**Reasoning:** Agent needs filtered retrieval by company name and must cite source file, date, and page number. Metadata is stored in ChromaDB alongside each chunk during ingestion — `get_documents_list()` queries ChromaDB directly for unique document metadata at runtime. A `metadata.json` config file exists only for batch ingestion via `scripts/ingest.py` as a development convenience. In a production API, metadata comes from the upload request parameters.
 
 **Future work:** Rich/derived metadata deferred as future improvement.
 
