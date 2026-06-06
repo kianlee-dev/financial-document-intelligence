@@ -11,7 +11,7 @@ if __name__ == "__main__":
     ]
 
     for query in queries:
-        answer = run(query)
+        result = run(query)
         print(f"\nQ: {query}")
-        print(f"A: {answer}")
+        print(f"A: {result["response"]}")
         print("-" * 80)

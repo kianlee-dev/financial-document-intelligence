@@ -5,28 +5,21 @@ Anthropic-format schemas sent to the model; TOOL_REGISTRY maps tool names to
 the callables the tools node dispatches to.
 """
 
-import json
-from pathlib import Path
-
 from langfuse import observe
 
 from src.context.prompt_builder import format_chunks_with_sources
 from src.retrieval.vectorstore import VectorStore
 
-METADATA_PATH = Path(__file__).resolve().parents[2] / "data" / "metadata.json"
-
 _store: VectorStore | None = None
 
-
-def _get_store() -> VectorStore:
+def get_store() -> VectorStore:
     """Lazily build a single VectorStore so import stays cheap and testable."""
     global _store
     if _store is None:
         _store = VectorStore()
     return _store
 
-
-def _build_filters(company_name: str | None, report_year: int | None) -> dict | None:
+def build_filters(company_name: str | None, report_year: int | None) -> dict | None:
     """Compose a ChromaDB metadata filter from the optional arguments."""
     clauses = []
     if company_name:
@@ -40,7 +33,6 @@ def _build_filters(company_name: str | None, report_year: int | None) -> dict | 
         return clauses[0]
     return {"$and": clauses}
 
-
 @observe()
 def search_documents(
     query: str,
@@ -48,25 +40,31 @@ def search_documents(
     report_year: int | None = None,
 ) -> str:
     """Retrieve relevant chunks from the vector store, optionally filtered."""
-    filters = _build_filters(company_name, report_year)
-    chunks = _get_store().search(query, filters=filters)
+    filters = build_filters(company_name, report_year)
+    chunks = get_store().search(query, filters=filters)
     if not chunks:
         return "No matching documents found."
     return format_chunks_with_sources(chunks)
 
+def get_documents_list() -> list[dict]:
+    """Return structured metadata for all documents from ChromaDB."""
+    store = get_store()
+    results = store.store._collection.get(include=["metadatas"])
+    metadatas = results["metadatas"]
+    if not metadatas:
+        return []
+    # deduplicate with set of tuples
+    unique = {(m["company_name"], m["report_year"], m["document_type"]) for m in metadatas}
+    # unpacks
+    return [{"company_name": c, "report_year": y, "document_type": t} for c, y, t in unique]
 
 @observe()
 def get_metadata() -> str:
     """Return the available companies, years, and document types."""
-    try:
-        with open(METADATA_PATH) as f:
-            metadata = json.load(f)
-    except FileNotFoundError:
-        return "Error: No metadata file found. No documents have been ingested."
-    except json.JSONDecodeError:
-        return "Error: The file exists, but is empty or contains invalid JSON."
-    
-    docs = list(metadata.values())
+
+    docs = get_documents_list()
+    if not docs:
+        return "No documents available."
     companies = sorted({d["company_name"] for d in docs})
     years = sorted({d["report_year"] for d in docs})
     doc_types = sorted({d["document_type"] for d in docs})
@@ -81,7 +79,6 @@ def get_metadata() -> str:
     lines.append(f"Years: {', '.join(str(y) for y in years)}")
     lines.append(f"Document types: {', '.join(doc_types)}")
     return "\n".join(lines)
-
 
 TOOL_SCHEMAS = [
     {
@@ -127,7 +124,6 @@ TOOL_SCHEMAS = [
         },
     },
 ]
-
 
 TOOL_REGISTRY = {
     "search_documents": search_documents,

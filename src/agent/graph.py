@@ -12,7 +12,7 @@ so the graph is hand-wired rather than using langgraph-prebuilt's ToolNode.
 import operator
 from typing import Annotated, TypedDict
 
-from langfuse import observe
+from langfuse import observe, get_client
 from langgraph.graph import END, StateGraph
 
 from src.agent.tools import TOOL_REGISTRY, TOOL_SCHEMAS
@@ -88,6 +88,7 @@ def build_graph():
 @observe()
 def run(query: str) -> str:
     """Run the agent on a single query and return the final answer text."""
+    langfuse = get_client()
     graph = build_graph()
     state = graph.invoke({"messages": [{"role": "user", "content": query}]})
     final = state["messages"][-1]
@@ -96,4 +97,5 @@ def run(query: str) -> str:
         for block in final["content"]
         if getattr(block, "type", None) == "text"
     ]
-    return "\n".join(texts)
+    trace_id = langfuse.get_current_trace_id()
+    return {"response": "\n".join(texts), "trace_id": trace_id}

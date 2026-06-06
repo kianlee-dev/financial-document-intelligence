@@ -20,6 +20,12 @@ class VectorStore:
         """Add chunks to the vector store"""
         self.store.add_documents(chunks)
 
+    def delete_documents(self, filters: dict = None) -> None:
+        """Delete documents matching the metadata filter."""
+        if not filters:
+            raise ValueError("Filters required — cannot delete without specifying criteria.")
+        self.store._collection.delete(where=filters)
+
     @observe()
     def search(self, query: str, k: int = 3, filters: dict = None) -> list[Document]:
         """Search for similar chunks and optional metadata filtering"""

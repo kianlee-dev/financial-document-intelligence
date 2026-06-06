@@ -87,7 +87,7 @@ def test_run_multi_turn_search_then_answer(monkeypatch):
 
     answer = graph.run("What were Apple net sales?")
 
-    assert "Apple net sales" in answer
+    assert "Apple net sales" in answer["response"]
     assert fake_llm.generate_with_tools.call_count == 2
 
 
@@ -100,7 +100,7 @@ def test_run_direct_answer_no_tool(monkeypatch):
 
     answer = graph.run("hello")
 
-    assert answer == "Direct answer."
+    assert answer["response"] == "Direct answer."
     assert fake_llm.generate_with_tools.call_count == 1
 
 def test_run_cross_company_comparison(monkeypatch):
@@ -118,8 +118,8 @@ def test_run_cross_company_comparison(monkeypatch):
 
     answer = graph.run("What were Apple net sales vs HSBC net sales?")
 
-    assert "Apple net sales" in answer
-    assert "HSBC net sales" in answer
+    assert "Apple net sales" in answer["response"]
+    assert "HSBC net sales" in answer["response"]
     assert fake_llm.generate_with_tools.call_count == 3
 
 def test_run_missing_company(monkeypatch):
@@ -136,6 +136,6 @@ def test_run_missing_company(monkeypatch):
 
     answer = graph.run("What were Tesla net sales")
 
-    assert "Tesla" in answer
-    assert "not available" in answer
+    assert "Tesla" in answer["response"]
+    assert "not available" in answer["response"]
     assert fake_llm.generate_with_tools.call_count == 2

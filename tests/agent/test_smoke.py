@@ -20,5 +20,5 @@ def test_agent_answers_single_company():
 
     answer = run("What was Apple's total net sales in fiscal year 2025?")
 
-    assert answer.strip()
-    assert "Apple" in answer
+    assert answer["response"].strip()
+    assert "Apple" in answer["response"]

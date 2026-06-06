@@ -344,32 +344,32 @@ Flow: User query enters Agent node. Agent decides to either call a tool or give 
 
 ### 6.1 Endpoints
 
-**Minimum viable API:**
-- `POST /query` — send a question, get an answer with citations
-- `POST /ingest` — trigger document ingestion
-- `GET /documents` — list ingested documents
+**Design Decision:** Four endpoints — POST /query, POST /ingest, GET /documents, DELETE /documents.
 
-**Optional:**
-- `GET /traces/{id}` — retrieve Langfuse trace for a query
-- `DELETE /documents/{id}` — remove a document from the vector store
-- `GET /health` — health check
-
-**Design Decision:** To be designed when implemented.
-
-**Reasoning:**
+**Reasoning:** Covers the full user workflow: upload documents, check what's available, ask questions, and remove documents. No PUT/PATCH as updating individual chunks isn't meaningful since chunking is a pipeline output. To update a document, simply delete and re-ingest.
 
 ---
 
 ### 6.2 Request/Response Schema
 
-**Considerations:**
-- What does the query request body look like? (query string, optional filters, conversation_id?)
-- What does the response look like? (answer, sources with page numbers, trace_id?)
-- Error handling: what error responses do you return?
+**Design Decision:**
 
-**Design Decision:** To be designed when implemented.
+POST /query:
+  Request: { "query": str }
+  Response: { "answer": str, "trace_id": str }
 
-**Reasoning:** 
+POST /ingest:
+  Request: multipart form — PDF file + company_name (str) + report_year (int) + document_type (str)
+  Response: { "status": str, "chunks_created": int }
+
+GET /documents:
+  Response: { "documents": list of { company_name, report_year, document_type } }
+
+DELETE /documents:
+  Request: { "company_name": str, "report_year": int (optional) }
+  Response: { "status": str, "deleted": bool }
+
+**Reasoning:** Query takes only the question string; the agent decides search scope and filters internally based on the query content. Ingest uses multipart form to support file upload alongside metadata. Response includes trace_id for Langfuse trace inspection. Error responses follow standard HTTP status codes (400, 404, 500).
 
 ---
 

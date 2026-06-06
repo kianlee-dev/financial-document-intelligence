@@ -4,6 +4,14 @@ from pathlib import Path
 from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader
 
+def load_single_document(file_path: Path, metadata: dict) -> list[Document]:
+    """Load a single PDF and attach provided metadata."""
+    loader = PyPDFLoader(str(file_path))
+    pages = loader.load()
+    for page in pages:
+        page.metadata.update(metadata)
+    return pages
+
 def load_documents(data_dir: Path) -> list[Document]:
     """Load all PDFs from data_dir, attach metadata from config."""
     
