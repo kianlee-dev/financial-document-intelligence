@@ -1,0 +1,9 @@
+venv/
+chroma_db/
+data/
+.ralph/
+.claude/
+__pycache__/
+.git/
+.DS_Store
+*.pyc
