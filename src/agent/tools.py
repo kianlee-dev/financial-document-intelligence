@@ -58,9 +58,14 @@ def search_documents(
 @observe()
 def get_metadata() -> str:
     """Return the available companies, years, and document types."""
-    with open(METADATA_PATH) as f:
-        metadata = json.load(f)
-
+    try:
+        with open(METADATA_PATH) as f:
+            metadata = json.load(f)
+    except FileNotFoundError:
+        return "Error: No metadata file found. No documents have been ingested."
+    except json.JSONDecodeError:
+        return "Error: The file exists, but is empty or contains invalid JSON."
+    
     docs = list(metadata.values())
     companies = sorted({d["company_name"] for d in docs})
     years = sorted({d["report_year"] for d in docs})

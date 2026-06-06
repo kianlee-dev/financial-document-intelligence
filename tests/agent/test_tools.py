@@ -83,3 +83,16 @@ def test_registry_and_schemas_match():
         s for s in tools.TOOL_SCHEMAS if s["name"] == "search_documents"
     )
     assert search_schema["input_schema"]["required"] == ["query"]
+
+def test_get_metadata_empty(monkeypatch, tmp_path):
+    fake_file = tmp_path / "metadata.json"
+    fake_file.write_text('{}')
+    monkeypatch.setattr(tools, "METADATA_PATH", fake_file)
+    result = tools.get_metadata()
+    assert "Available documents:" in result
+    assert "Apple" not in result
+
+def test_get_metadata_missing_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(tools, "METADATA_PATH", tmp_path / "nonexistent.json")
+    result = tools.get_metadata()
+    assert "No metadata file found" in result

@@ -21,15 +21,12 @@ class LLMClient:
 
     @observe()
     def generate_with_tools(self, messages: list, system_prompt: str, tools: list) -> Message:
-        """Send a conversation with tool schemas to the LLM API.
-
-        Returns the raw Anthropic Message; the caller reads .content (text and
-        tool_use blocks) and .stop_reason to drive the agent loop.
-        """
-        return self.client.messages.create(
+        """Send a conversation with tool schemas to the LLM API."""
+        response = self.client.messages.create(
             model=self.model,
             max_tokens=1024,
             system=system_prompt,
             tools=tools,
             messages=messages,
         )
+        return response

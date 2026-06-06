@@ -40,7 +40,7 @@ def _is_tool_use(block) -> bool:
 
 
 @observe()
-def agent_node(state: AgentState) -> dict:
+def _agent_node(state: AgentState) -> dict:
     """Ask the model what to do next; append its reply to the messages."""
     response = _get_llm().generate_with_tools(
         state["messages"], get_system_prompt(), TOOL_SCHEMAS
@@ -49,7 +49,7 @@ def agent_node(state: AgentState) -> dict:
 
 
 @observe()
-def tools_node(state: AgentState) -> dict:
+def _tools_node(state: AgentState) -> dict:
     """Execute every tool_use block in the last reply, return tool_result blocks."""
     last = state["messages"][-1]
     results = []
@@ -66,7 +66,7 @@ def tools_node(state: AgentState) -> dict:
     return {"messages": [{"role": "user", "content": results}]}
 
 
-def route(state: AgentState) -> str:
+def _route(state: AgentState) -> str:
     """Continue to the tools node if the model requested a tool, else stop."""
     last = state["messages"][-1]
     if any(_is_tool_use(block) for block in last["content"]):
@@ -77,10 +77,10 @@ def route(state: AgentState) -> str:
 def build_graph():
     """Build and compile the agent StateGraph."""
     graph = StateGraph(AgentState)
-    graph.add_node("agent", agent_node)
-    graph.add_node("tools", tools_node)
+    graph.add_node("agent", _agent_node)
+    graph.add_node("tools", _tools_node)
     graph.set_entry_point("agent")
-    graph.add_conditional_edges("agent", route, {"tools": "tools", END: END})
+    graph.add_conditional_edges("agent", _route, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
     return graph.compile()
 
