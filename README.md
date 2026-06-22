@@ -1,6 +1,6 @@
 # Financial Document Intelligence
 
-An AI agent that ingests financial reports, stores them in a vector database, and answers questions with citations. Built with a LangGraph tool-calling agent over a RAG pipeline, traced through Langfuse, and served via FastAPI. Supports annual reports and SEC filings across multiple markets (US, UK, HK, JP).
+An AI agent that ingests financial reports, stores them in a vector database, and answers questions with citations. Built with a LangGraph tool-calling agent over a RAG pipeline, evaluated with an LLM-as-judge suite, traced through Langfuse, and served via FastAPI. Supports annual reports and SEC filings across multiple markets (US, UK, HK, JP).
 
 ## Project Structure
 ```
@@ -21,16 +21,21 @@ financial-document-intelligence/
 │   │   └── client.py          # Claude API wrapper — generate() and generate_with_tools()
 │   ├── api/
 │   │   └── main.py            # FastAPI endpoints — query, upload, list, delete
-│   └── evals/                 # Evaluation suite (planned)
+│   └── evals/
+│       ├── test_dataset.py    # 35 ground-truth Q&A pairs across 5 categories
+│       ├── judge.py           # LLM-as-judge — scores relevance, accuracy, faithfulness
+│       └── runner.py          # Eval pipeline — agent + judge + Langfuse scoring
 ├── scripts/
 │   ├── ingest.py              # Batch ingestion pipeline
 │   ├── query.py               # Direct Q&A chain (no agent)
 │   └── agent_query.py         # Agent-based queries with tool calling
 ├── tests/
-│   └── agent/
-│       ├── test_tools.py      # 11 tests — filters, search, metadata, schemas
-│       ├── test_graph.py      # 7 tests — routing, dispatch, multi-turn, edge cases
-│       └── test_smoke.py      # 1 test — real API end-to-end, skippable
+│   ├── agent/
+│   │   ├── test_tools.py      # 11 tests — filters, search, metadata, schemas
+│   │   ├── test_graph.py      # 7 tests — routing, dispatch, multi-turn, edge cases
+│   │   └── test_smoke.py      # 1 test — real API end-to-end, skippable
+│   └── evals/
+│       └── test_eval_suite.py # 5 threshold tests — relevance, accuracy, faithfulness, precision, hallucinations
 ├── data/                      # Financial PDFs (not tracked) + metadata.json
 ├── design_decisions.md        # Architecture decisions with reasoning
 ├── Dockerfile
@@ -66,6 +71,7 @@ The agent sits on top of a standard RAG pipeline. Instead of a fixed retrieve �
 | `context/` | Prompt assembly | What goes into the prompt is separate from how it gets sent |
 | `llm/` | API wrapper | Model-agnostic interface — swap Claude for any provider in one line |
 | `api/` | HTTP interface | FastAPI layer is separate from agent logic |
+| `evals/` | LLM-as-judge evaluation suite | Measures retrieval and answer quality independently of agent logic |
 
 ## Design Decisions
 
@@ -100,9 +106,39 @@ LangGraph's `Annotated[list, operator.add]` ensures each node appends to the mes
 | `GET` | `/documents` | List all available documents in the collection |
 | `DELETE` | `/documents` | Remove a document's chunks by metadata filter |
 
+## Evaluation Suite
+
+35 ground-truth Q&A pairs across 5 categories, scored by a second LLM call (LLM-as-judge) on three dimensions. Scores are attached to Langfuse traces for dashboard analysis. Run as pytest with threshold assertions.
+
+**Results (35 test cases, 5 companies)**
+
+| Metric | Score | Threshold | Status |
+|--------|-------|-----------|--------|
+| Relevance | 4.97/5 | ≥ 3.5 | ✅ Pass |
+| Accuracy | 4.68/5 | ≥ 3.5 | ✅ Pass |
+| Faithfulness | 4.27/5 | ≥ 3.5 | ✅ Pass |
+| Retrieval Precision@3 | 0.97 | ≥ 0.7 | ✅ Pass |
+| Hallucinations | 0 | 0 | ✅ Pass |
+
+**Test categories**
+
+| Category | Count | What it tests |
+|----------|-------|---------------|
+| Factual extraction | 16 | Single correct answer — revenue, net income, employee count |
+| Cross-company comparison | 4 | Multiple retrievals with different filters, synthesised answer |
+| Qualitative | 7 | Narrative retrieval — risk factors, strategy, business segments |
+| Unanswerable | 4 | Company not in collection or wrong year — should refuse |
+| Metadata lookup | 3 | Available companies, document types, years covered |
+
+**How it works**
+
+Each test case runs through the full agent pipeline, producing a Langfuse trace. A second Claude call (the judge) receives the query, expected answer, actual response, and retrieved chunks, then scores relevance, accuracy, and faithfulness on a 1–5 scale. Scores are attached to the trace via `langfuse.create_score()`. Retrieval precision checks whether chunks came from the expected company using `[Source:]` label matching. Metadata queries are excluded from faithfulness scoring because they use `get_metadata` (not `search_documents`), so empty chunks are by design.
+
+**Known weakness:** Sony's annual report contains chart-heavy pages with encoded figures that pypdf flattens poorly. The eval suite catches this — Sony factual extraction queries score lower on accuracy than other companies. A future upgrade to pdfplumber or unstructured.io would address this.
+
 ## Test Coverage
 
-18 tests + 1 smoke test, all passing.
+23 tests + 1 smoke test + 5 eval tests, all passing.
 
 **Tool tests**
 
@@ -134,6 +170,16 @@ LangGraph's `Annotated[list, operator.add]` ensures each node appends to the mes
 |------|-----------------|
 | `test_agent_answers_single_company` | Real API end-to-end — skipped without `ANTHROPIC_API_KEY` |
 
+**Eval tests**
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_relevance_threshold` | Average relevance ≥ 3.5/5 |
+| `test_accuracy_threshold` | Average accuracy ≥ 3.5/5 |
+| `test_faithfulness_threshold` | Average faithfulness ≥ 3.5/5 (excluding metadata queries) |
+| `test_precision_threshold` | Retrieval precision@3 ≥ 0.7 |
+| `test_zero_hallucinations` | Zero responses with faithfulness < 3 (excluding metadata queries) |
+
 ## Observability
 
 Every query is traced through Langfuse at three levels:
@@ -141,7 +187,7 @@ Every query is traced through Langfuse at three levels:
 - **Context assembly** — formatted prompt
 - **LLM calls** — prompt, completion, tokens
 
-The API returns a `trace_id` with each response for direct lookup in the Langfuse dashboard.
+The API returns a `trace_id` with each response for direct lookup in the Langfuse dashboard. Evaluation scores (relevance, accuracy, faithfulness) are attached to traces via the Langfuse SDK, enabling filtered analysis of low-scoring queries.
 
 ## How to Run
 
@@ -193,11 +239,17 @@ Open `http://localhost:8000/docs` for interactive Swagger UI.
 
 **Run tests**
 ```bash
-# All tests except smoke (no API key needed)
+# Unit and integration tests (no API key needed)
 PYTHONPATH=. pytest tests/agent -m "not smoke"
 
 # Smoke test (requires API key + ingested data)
 PYTHONPATH=. pytest tests/agent/test_smoke.py -m smoke
+
+# Evaluation suite (requires API key + ingested data, ~$3 per run)
+PYTHONPATH=. pytest tests/evals -m eval -v -s
+
+# Eval runner standalone (prints summary table)
+PYTHONPATH=. python src/evals/runner.py
 ```
 
 **Docker**
@@ -219,11 +271,12 @@ docker run -p 8000:8000 \
 - No token budget management — works within Claude's context window at current scale but would need truncation logic for longer conversations
 - Single embedding model — all-MiniLM-L6-v2 is a prototyping choice, not production-grade
 - No hybrid search — pure vector search can miss exact keyword matches (acronyms, ticker symbols)
+- pypdf struggles with chart-heavy PDFs (Sony annual report) — encoded figures are flattened, reducing accuracy on table/chart extraction queries
 
 **Planned extensions**
-- Evaluation suite — retrieval precision@k, LLM-as-judge scoring, faithfulness detection, run as pytest with Langfuse integration
 - Sliding window memory for conversational follow-up queries
 - Reflexion/self-critique node — second LLM pass to verify answer is grounded in sources, critical for financial accuracy
 - vLLM integration for local model serving in air-gapped deployments
 - Google ADK comparison — rebuild one agent flow in ADK to demonstrate framework flexibility
 - Hybrid search (vector + BM25 keyword) via reciprocal rank fusion
+- Upgrade PDF extraction to pdfplumber or unstructured.io for layout-aware parsing
