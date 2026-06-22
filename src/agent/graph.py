@@ -86,7 +86,7 @@ def build_graph():
 
 
 @observe()
-def run(query: str) -> str:
+def run(query: str) -> dict:
     """Run the agent on a single query and return the final answer text."""
     langfuse = get_client()
     graph = build_graph()
@@ -98,4 +98,18 @@ def run(query: str) -> str:
         if getattr(block, "type", None) == "text"
     ]
     trace_id = langfuse.get_current_trace_id()
-    return {"response": "\n".join(texts), "trace_id": trace_id}
+    tool_map = {}
+    for message in state["messages"]:
+        if message["role"] == "assistant":
+            for block in message["content"]:
+                if _is_tool_use(block):
+                    tool_map[block.id] = block.name
+
+    chunks = []
+    for message in state["messages"]:
+        if message["role"] == "user" and isinstance(message["content"], list):
+            for block in message["content"]:
+                if block.get("type") == "tool_result":
+                    if tool_map.get(block["tool_use_id"]) == "search_documents":
+                        chunks.append(block["content"])
+    return {"response": "\n".join(texts), "trace_id": trace_id, "retrieved_chunks": chunks}

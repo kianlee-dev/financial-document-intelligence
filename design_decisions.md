@@ -313,7 +313,7 @@ Flow: User query enters Agent node. Agent decides to either call a tool or give 
 ### 5.1 Primary Model
 
 **Options:**
-- **Claude (Anthropic API)** — your primary choice. Sonnet for speed/cost, Opus for quality.
+- **Claude (Anthropic API)** — Sonnet for speed/cost, Opus for quality.
 - **GPT-4o (OpenAI API)** — alternative, different strengths
 - **Open-source via vLLM** — Mistral-7B, LLaMA-3-8B. Local, private, lower quality. (Deferred)
 
@@ -401,5 +401,91 @@ Where in your code do you add Langfuse instrumentation?
 **Design Decision:** Trace retrieval, context assembly, and LLM calls.
 
 **Reasoning:** Covers the full query path. API layer tracing will be added when FastAPI endpoints exist.
+
+---
+
+## 8. Evaluation Suite
+
+### 8.1 Evaluation Types
+
+**Options:**
+- **Retrieval evaluation** — precision@k, recall@k (did you retrieve the right chunks?)
+- **Answer correctness** — compare generated answer against known correct answers
+- **LLM-as-judge** — use a second LLM to score relevance, accuracy, faithfulness (1-5)
+- **Hallucination detection** — check if answer contains claims not supported by retrieved context
+- **Latency benchmarks** — end-to-end response time
+
+**Design Decision:** Three evaluation types — retrieval precision@k, LLM-as-judge scoring (relevance, accuracy, faithfulness on 1-5 scale), and faithfulness detection (binary grounded vs hallucinated).
+
+**Reasoning:** Retrieval eval catches bad chunking or embedding issues — if wrong chunks are retrieved, no amount of prompt engineering fixes the answer. LLM-as-judge is the standard for measuring answer quality at scale without manual review. Faithfulness detection is critical for financial documents — a hallucinated revenue figure is worse than no answer. Latency benchmarks deferred as the bottleneck is LLM API latency which is outside our control.
+
+---
+
+### 8.2 Test Dataset
+
+**Options:**
+- **Manual** — hand-write 20-30 question/answer pairs from your documents
+- **LLM-generated** — use Claude to generate Q&A pairs from chunks, then manually verify
+- **Hybrid** — LLM generates, you curate and correct
+
+**Design Decision:** Hybrid — LLM generates 30-40 candidate Q&A pairs from actual document chunks, manually verified and corrected. Stored as a Langfuse dataset, not a local file.
+
+**Reasoning:** Pure manual is highest quality but time-consuming and produces too few pairs. Pure LLM-generated risks testing the same biases as the system being evaluated. Hybrid gets volume from the LLM and quality from human review. Storing in Langfuse datasets rather than local JSON enables dashboard-level analysis and cross-run comparison.
+
+**Test categories covered:**
+- Factual extraction (single correct answer, e.g. "What was Apple's revenue?")
+- Cross-company comparison (requires multiple retrievals)
+- Unanswerable queries (company not in collection, should refuse)
+- Numerical precision (year-over-year changes, catches arithmetic errors)
+- Qualitative queries (risk factors, strategy — tests narrative retrieval)
+
+---
+
+### 8.3 Evaluation Pipeline
+
+**Options:**
+- **pytest only** — run evals as test functions, results printed to console
+- **Standalone script** — separate eval runner, results saved to local JSON
+- **Langfuse-native** — test cases in Langfuse datasets, runs tracked as dataset runs, scores attached to traces, analysis in Langfuse dashboard
+- **Hybrid pytest + Langfuse** — pytest triggers runs, Langfuse stores data and scores
+
+**Design Decision:** Hybrid pytest + Langfuse. pytest triggers evaluation runs. Test cases stored in Langfuse datasets. Each eval item runs the agent, producing a Langfuse trace. LLM-as-judge scores are attached to each trace via the Langfuse SDK. Results analysed in the Langfuse dashboard.
+
+**Reasoning:** pytest provides a familiar, automatable entry point consistent with the existing test suite. Langfuse datasets provide persistent storage for test cases that survives across runs. Langfuse scoring attaches quality metrics directly to traces — you can filter for low-scoring traces and drill into the full pipeline (retrieval → context → LLM) to diagnose exactly where a failure occurred. This uses Langfuse for its full purpose: observability and evaluation, not just tracing.
+
+**Pipeline flow:**
+
+1. pytest triggers eval run
+2. Load dataset from Langfuse (30-40 Q&A pairs)
+3. For each item: agent runs query, Langfuse trace created
+4. Retrieval precision@k scored
+5. LLM-as-judge scores relevance, accuracy, faithfulness (1-5)
+6. Scores attached to trace via Langfuse SDK
+7. Langfuse dashboard: view scores, compare runs, filter failures
+8. pytest asserts minimum thresholds met
+
+**Thresholds:**
+- Retrieval precision@3: ≥ 0.7 (at least 2 of 3 chunks relevant)
+- LLM-as-judge average score: ≥ 3.5 / 5.0 across relevance, accuracy, faithfulness
+- Faithfulness: zero hallucinated claims (binary per-answer check)
+
+**Future work:** Run evals in CI/CD to gate releases — no deployment if scores regress below thresholds. Compare scores across configurations (e.g. chunk size 500 vs 1000, k=3 vs k=5) to make data-driven parameter decisions.
+
+--- 
+
+## 9. Final Architecture Flow
+
+**Ingestion path:**
+PDF files → [pypdf loader] → [Minimal preprocessing] → [RecursiveCharacterTextSplitter, 2000 chars, 400 overlap] → [all-MiniLM-L6-v2 embedding] → [Single ChromaDB collection with metadata]
+
+**Query path:**
+User query → [FastAPI] → [LangGraph agent node] → decides tool call or final answer
+
+- If tool call → [Tools node] → search_documents (ChromaDB filtered similarity search) or get_metadata (ChromaDB unique docs) → result back to agent node → loop
+- If final answer → [Context assembly: labelled chunks with Source tags] → [Claude Sonnet via raw Anthropic SDK] → [Response + citations + Langfuse trace_id] → return to user
+
+**Observability:** Every step traced through Langfuse — retrieval, context assembly, LLM calls. Trace ID returned in API response for dashboard lookup.
+
+**Final Reasoning:** Every component is separated by responsibility and swappable independently. pypdf can be replaced with a layout-aware extractor without touching retrieval. The embedding model is a one-line constructor change. ChromaDB can be swapped for Pinecone without touching the agent. The agent orchestrates retrieval without knowing storage internals. The LLM client abstracts the model provider — swapping Claude for vLLM is a config change. FastAPI is decoupled from agent logic. Langfuse traces every layer independently so failures can be diagnosed at the exact point they occur. The architecture is designed for a prototype that can evolve toward production by replacing individual components, not rewriting the system.
 
 ---
