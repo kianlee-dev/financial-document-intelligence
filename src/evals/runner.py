@@ -8,6 +8,7 @@ def run_eval() -> dict:
     score_list = []
     langfuse = get_client()
     precisions = []
+    hallucinated_queries = []
     hallucinations = 0
 
     for data in EVAL_DATASET:
@@ -40,13 +41,16 @@ def run_eval() -> dict:
             precisions.append(precision)
 
         # Hallucination count
-        if scores["faithfulness"] < 3:
+        if scores["faithfulness"] < 3 and data["category"] != "metadata_lookup":
             hallucinations += 1
+            hallucinated_queries.append(data["query"])
 
     # --- Averages ---
     avg_relevance = sum(s["relevance"] for s in score_list) / len(score_list)
     avg_accuracy = sum(s["accuracy"] for s in score_list) / len(score_list)
-    avg_faithfulness = sum(s["faithfulness"] for s in score_list) / len(score_list)
+    # Exclude metadata_lookup — these use get_metadata tool, not search_documents, so retrieved_chunks is empty by design
+    faith_scores = [s["faithfulness"] for s, d in zip(score_list, EVAL_DATASET) if d["category"] != "metadata_lookup"]
+    avg_faithfulness = sum(faith_scores) / len(faith_scores) if faith_scores else 0
     avg_precision = sum(precisions) / len(precisions) if precisions else 0
 
     # --- Summary table ---
@@ -60,6 +64,10 @@ def run_eval() -> dict:
     print(f"{'Averages':<60} {avg_relevance:>4.1f} {avg_accuracy:>4.1f} {avg_faithfulness:>4.1f}")
     print(f"Precision@k: {avg_precision:.2f} | Hallucinations: {hallucinations}")
     print(f"Thresholds: Avg >= 3.5 | Precision >= 0.7 | Hallucinations == 0")
+    if hallucinated_queries:
+        print(f"\nHallucinated queries:")
+        for q in hallucinated_queries:
+            print(f"  - {q}")
 
     return {"relevance": avg_relevance, "accuracy": avg_accuracy, "faithfulness": avg_faithfulness, "precision": avg_precision, "hallucinations": hallucinations}
 
