@@ -1,6 +1,6 @@
 # Financial Document Intelligence
 
-An AI agent that ingests financial reports, stores them in a vector database, and answers questions with citations. Built with a LangGraph tool-calling agent over a RAG pipeline, evaluated with an LLM-as-judge suite, traced through Langfuse, and served via FastAPI. Supports annual reports and SEC filings across multiple markets (US, UK, HK, JP).
+An AI agent that ingests financial reports, stores them in a vector database, and answers questions with citations. Built with a LangGraph tool-calling agent over a RAG pipeline, evaluated with an LLM-as-judge suite, traced through Langfuse, and served via FastAPI. Supports swappable LLM backends (Claude API or local models via Ollama/vLLM). Covers annual reports and SEC filings across multiple markets (US, UK, HK, JP).
 
 ## Project Structure
 ```
@@ -18,7 +18,9 @@ financial-document-intelligence/
 │   ├── context/
 │   │   └── prompt_builder.py  # System prompt, chunk formatting, prompt assembly
 │   ├── llm/
-│   │   └── client.py          # Claude API wrapper — generate() and generate_with_tools()
+│   │   ├── client.py          # Factory — routes to Anthropic or OpenAI backend via LLM_BACKEND
+│   │   ├── anthropic_client.py # Claude API wrapper — generate() and generate_with_tools()
+│   │   └── openai_client.py   # OpenAI-compatible wrapper — Ollama/vLLM with message translation
 │   ├── api/
 │   │   └── main.py            # FastAPI endpoints — query, upload, list, delete
 │   └── evals/
@@ -69,7 +71,7 @@ The agent sits on top of a standard RAG pipeline. Instead of a fixed retrieve �
 | `retrieval/` | Embedding and vector search | Storage and search logic testable independently of agent |
 | `agent/` | Tool-calling decision loop | Agent orchestrates retrieval without knowing storage internals |
 | `context/` | Prompt assembly | What goes into the prompt is separate from how it gets sent |
-| `llm/` | API wrapper | Model-agnostic interface — swap Claude for any provider in one line |
+| `llm/` | LLM backend abstraction | Factory pattern — swap Claude for Ollama/vLLM via environment variable |
 | `api/` | HTTP interface | FastAPI layer is separate from agent logic |
 | `evals/` | LLM-as-judge evaluation suite | Measures retrieval and answer quality independently of agent logic |
 
@@ -79,7 +81,10 @@ The agent sits on top of a standard RAG pipeline. Instead of a fixed retrieve �
 ReAct agents reason in free-form loops which is unpredictable iteration counts, harder to debug. Multi-agent architectures add orchestration complexity without benefit at this scale. Tool-calling gives structured, predictable behavior: the model either calls a defined tool or gives a final answer. Each decision is visible in Langfuse traces.
 
 **Raw Anthropic SDK, not LangChain ChatAnthropic**
-`LLMClient` wraps the raw `anthropic` SDK directly. This avoids locking the agent into LangChain's model abstraction which makes changing the LLM backend a one-line config change in the client constructor.
+`AnthropicClient` wraps the raw `anthropic` SDK directly. This avoids locking the agent into LangChain's model abstraction. A parallel `OpenAIClient` wraps the OpenAI SDK for Ollama/vLLM compatibility. Both expose identical `generate()` and `generate_with_tools()` interfaces. The factory class (`LLMClient`) routes to the correct backend via the `LLM_BACKEND` environment variable — the agent graph doesn't know which backend is active.
+
+**Message translation over neutral format**
+The agent graph stores messages in Anthropic format (the primary backend). `OpenAIClient` translates tool schemas, message history, and responses internally — converting Anthropic's `tool_use` blocks to OpenAI's `tool_calls`, `tool_result` messages to `role: tool`, and wrapping responses in SimpleNamespace to match Anthropic's attribute interface. This keeps the translation cost in the secondary backend only.
 
 **Minimal tools**
 `search_documents` and `get_metadata` are sufficient. A `calculate` tool is unnecessary as Claude handles financial arithmetic natively. A `compare_companies` tool is redundant; it's just two `search_documents` calls with different filters. Fewer tools means fewer wrong decisions by the agent.
@@ -135,6 +140,25 @@ LangGraph's `Annotated[list, operator.add]` ensures each node appends to the mes
 Each test case runs through the full agent pipeline, producing a Langfuse trace. A second Claude call (the judge) receives the query, expected answer, actual response, and retrieved chunks, then scores relevance, accuracy, and faithfulness on a 1–5 scale. Scores are attached to the trace via `langfuse.create_score()`. Retrieval precision checks whether chunks came from the expected company using `[Source:]` label matching. Metadata queries are excluded from faithfulness scoring because they use `get_metadata` (not `search_documents`), so empty chunks are by design.
 
 **Known weakness:** Sony's annual report contains chart-heavy pages with encoded figures that pypdf flattens poorly. The eval suite catches this — Sony factual extraction queries score lower on accuracy than other companies. A future upgrade to pdfplumber or unstructured.io would address this.
+
+## LLM Backend Abstraction
+
+The LLM layer supports two backends, swappable via environment variable:
+
+| Backend | Client | Model | Use case |
+|---------|--------|-------|----------|
+| `anthropic` (default) | `AnthropicClient` | Claude Sonnet | Production — highest quality |
+| `openai` | `OpenAIClient` | Ollama (Qwen 2.5 14B, Mistral, etc.) | Air-gapped — data stays local |
+
+```bash
+# Default — Claude API
+PYTHONPATH=. python scripts/agent_query.py
+
+# Local model via Ollama
+LLM_BACKEND=openai LOCAL_MODEL=qwen2.5:14b PYTHONPATH=. python scripts/agent_query.py
+```
+
+**Cloud vs local quality:** Claude Sonnet scores 4.68/5 accuracy on the eval suite with correct citations. Qwen 2.5 14B successfully calls tools and completes the agent loop, but produces lower quality answers — wrong figures, missed cross-company retrievals, occasional wrong-language responses. The quality gap is expected; local models serve air-gapped deployments where data isolation is the priority, not answer quality parity. In production on GPU servers, vLLM replaces Ollama with the same `OpenAIClient` code — only `base_url` changes.
 
 ## Test Coverage
 
@@ -193,8 +217,9 @@ The API returns a `trace_id` with each response for direct lookup in the Langfus
 
 **Prerequisites**
 - Python 3.11+
-- Anthropic API key (for LLM calls)
+- Anthropic API key (for Claude backend)
 - Langfuse account (free tier, for tracing)
+- Ollama (optional, for local model backend)
 
 **Local setup**
 ```bash
@@ -276,7 +301,6 @@ docker run -p 8000:8000 \
 **Planned extensions**
 - Sliding window memory for conversational follow-up queries
 - Reflexion/self-critique node — second LLM pass to verify answer is grounded in sources, critical for financial accuracy
-- vLLM integration for local model serving in air-gapped deployments
 - Google ADK comparison — rebuild one agent flow in ADK to demonstrate framework flexibility
 - Hybrid search (vector + BM25 keyword) via reciprocal rank fusion
 - Upgrade PDF extraction to pdfplumber or unstructured.io for layout-aware parsing

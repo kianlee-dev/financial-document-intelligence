@@ -2,13 +2,14 @@
 
 from openai import OpenAI
 from langfuse import observe
+import os
 from types import SimpleNamespace
 import json
 
 class OpenAIClient:
-    def __init__(self, model: str = "llama3.1", base_url="http://localhost:11434/v1", api_key: str = "ollama"):
+    def __init__(self, model: str = None, base_url="http://localhost:11434/v1", api_key: str = "ollama"):
         self.client = OpenAI(base_url=base_url, api_key=api_key)
-        self.model = model
+        self.model = model or os.environ.get("LOCAL_MODEL", "mistral")
 
     @observe()
     def generate(self, prompt: str,  system_prompt: str = "") -> str:

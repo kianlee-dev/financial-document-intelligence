@@ -55,7 +55,10 @@ def _tools_node(state: AgentState) -> dict:
     results = []
     for block in last["content"]:
         if _is_tool_use(block):
-            output = TOOL_REGISTRY[block.name](**block.input)
+            try:
+                output = TOOL_REGISTRY[block.name](**block.input)
+            except TypeError as e:
+                output = f"Tool call failed: {e}"
             results.append(
                 {
                     "type": "tool_result",
@@ -64,7 +67,6 @@ def _tools_node(state: AgentState) -> dict:
                 }
             )
     return {"messages": [{"role": "user", "content": results}]}
-
 
 def _route(state: AgentState) -> str:
     """Continue to the tools node if the model requested a tool, else stop."""

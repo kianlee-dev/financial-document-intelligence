@@ -1,13 +1,14 @@
 from src.llm.client import LLMClient
 import json
+from src.llm.anthropic_client import AnthropicClient
 
-_llm: LLMClient | None = None
+_llm = None
 
 def _get_llm() -> LLMClient:
     """Lazily build a single LLMClient so import stays cheap and testable."""
     global _llm
     if _llm is None:
-        _llm = LLMClient()
+        _llm = AnthropicClient()
     return _llm
 
 def judge(query: str, expected: str, actual: str, chunks: list[str]) -> dict:

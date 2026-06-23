@@ -19,11 +19,14 @@ def get_store() -> VectorStore:
         _store = VectorStore()
     return _store
 
-def build_filters(company_name: str | None, report_year: int | None) -> dict | None:
+def build_filters(company_name: str | list | None, report_year: int | None) -> dict | None:
     """Compose a ChromaDB metadata filter from the optional arguments."""
     clauses = []
     if company_name:
-        clauses.append({"company_name": company_name})
+        if isinstance(company_name, list):
+            clauses.append({"company_name": {"$in": company_name}})
+        else:
+            clauses.append({"company_name": company_name})
     if report_year:
         clauses.append({"report_year": report_year})
 
@@ -32,6 +35,7 @@ def build_filters(company_name: str | None, report_year: int | None) -> dict | N
     if len(clauses) == 1:
         return clauses[0]
     return {"$and": clauses}
+
 
 @observe()
 def search_documents(
