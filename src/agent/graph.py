@@ -97,17 +97,20 @@ def run(query: str) -> dict:
         for block in final["content"]
         if getattr(block, "type", None) == "text"
     ]
+
     trace_id = langfuse.get_current_trace_id()
+
+    # Map tool_use IDs to names, collect content from search_documents results only
+
     tool_map = {}
+    chunks = []
+
     for message in state["messages"]:
         if message["role"] == "assistant":
             for block in message["content"]:
                 if _is_tool_use(block):
                     tool_map[block.id] = block.name
-
-    chunks = []
-    for message in state["messages"]:
-        if message["role"] == "user" and isinstance(message["content"], list):
+        elif message["role"] == "user" and isinstance(message["content"], list):
             for block in message["content"]:
                 if block.get("type") == "tool_result":
                     if tool_map.get(block["tool_use_id"]) == "search_documents":
