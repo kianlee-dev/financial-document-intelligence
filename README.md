@@ -1,6 +1,6 @@
 # Financial Document Intelligence
 
-An AI agent that ingests financial reports, stores them in a vector database, and answers questions with citations. Built with a LangGraph tool-calling agent over a RAG pipeline, evaluated with an LLM-as-judge suite, traced through Langfuse, and served via FastAPI. Supports swappable LLM backends (Claude API or local models via Ollama/vLLM). Covers annual reports and SEC filings across multiple markets (US, UK, HK, JP).
+An AI agent that ingests financial reports, stores them in a vector database, and answers questions with citations. Built with a LangGraph tool-calling agent over a RAG pipeline, evaluated with an LLM-as-judge suite, traced through Langfuse, and served via FastAPI. Supports swappable LLM backends (Claude API or local models via Ollama/vLLM) and includes a Google ADK comparison agent. Covers annual reports and SEC filings across multiple markets (US, UK, HK, JP).
 
 ## Project Structure
 ```
@@ -15,6 +15,8 @@ financial-document-intelligence/
 │   ├── agent/
 │   │   ├── tools.py           # Tool implementations, Anthropic schemas, dispatch registry
 │   │   └── graph.py           # LangGraph StateGraph — nodes, routing, run()
+│   ├── agent_adk/
+│   │   └── agent.py           # Google ADK agent — async tool wrappers, Gemini-specific prompt
 │   ├── context/
 │   │   └── prompt_builder.py  # System prompt, chunk formatting, prompt assembly
 │   ├── llm/
@@ -30,7 +32,8 @@ financial-document-intelligence/
 ├── scripts/
 │   ├── ingest.py              # Batch ingestion pipeline
 │   ├── query.py               # Direct Q&A chain (no agent)
-│   └── agent_query.py         # Agent-based queries with tool calling
+│   ├── agent_query.py         # Agent-based queries with tool calling
+│   └── adk_query.py           # ADK agent queries with Gemini
 ├── tests/
 │   ├── agent/
 │   │   ├── test_tools.py      # 11 tests — filters, search, metadata, schemas
@@ -70,6 +73,7 @@ The agent sits on top of a standard RAG pipeline. Instead of a fixed retrieve �
 | `ingestion/` | PDF loading and chunking | Separated from retrieval — ingestion runs once, retrieval runs per query |
 | `retrieval/` | Embedding and vector search | Storage and search logic testable independently of agent |
 | `agent/` | Tool-calling decision loop | Agent orchestrates retrieval without knowing storage internals |
+| `agent_adk/` | Google ADK comparison agent | Same tools and RAG pipeline, different framework — demonstrates portability |
 | `context/` | Prompt assembly | What goes into the prompt is separate from how it gets sent |
 | `llm/` | LLM backend abstraction | Factory pattern — swap Claude for Ollama/vLLM via environment variable |
 | `api/` | HTTP interface | FastAPI layer is separate from agent logic |
@@ -87,7 +91,7 @@ ReAct agents reason in free-form loops which is unpredictable iteration counts, 
 The agent graph stores messages in Anthropic format (the primary backend). `OpenAIClient` translates tool schemas, message history, and responses internally — converting Anthropic's `tool_use` blocks to OpenAI's `tool_calls`, `tool_result` messages to `role: tool`, and wrapping responses in SimpleNamespace to match Anthropic's attribute interface. This keeps the translation cost in the secondary backend only.
 
 **Minimal tools**
-`search_documents` and `get_metadata` are sufficient. A `calculate` tool is unnecessary as Claude handles financial arithmetic natively. A `compare_companies` tool is redundant; it's just two `search_documents` calls with different filters. Fewer tools means fewer wrong decisions by the agent.
+`search_documents` and `get_metadata` are sufficient for Claude. A `calculate` tool is unnecessary as Claude handles financial arithmetic natively. A `compare_companies` tool is redundant with Claude — it's just two `search_documents` calls with different filters. Fewer tools means fewer wrong decisions by the agent. (The ADK comparison revealed that Gemini *does* need `compare_companies` because it can't reliably self-regulate multi-call sequences — see the ADK section.)
 
 **ChromaDB as metadata source, not a separate config file**
 Document metadata (company, year, type) is stored in ChromaDB alongside each chunk. `get_documents_list()` queries ChromaDB directly for unique document metadata as there is no separate config file to maintain or sync. A `metadata.json` file exists only for batch ingestion via `scripts/ingest.py`.
@@ -160,6 +164,46 @@ LLM_BACKEND=openai LOCAL_MODEL=qwen2.5:14b PYTHONPATH=. python scripts/agent_que
 
 **Cloud vs local quality:** Claude Sonnet scores 4.68/5 accuracy on the eval suite with correct citations. Qwen 2.5 14B successfully calls tools and completes the agent loop, but produces lower quality answers — wrong figures, missed cross-company retrievals, occasional wrong-language responses. The quality gap is expected; local models serve air-gapped deployments where data isolation is the priority, not answer quality parity. In production on GPU servers, vLLM replaces Ollama with the same `OpenAIClient` code — only `base_url` changes.
 
+## Google ADK Comparison
+
+The same RAG pipeline rebuilt with Google's Agent Development Kit to compare framework patterns. Uses the same ChromaDB, same retrieval logic, same tools — only the agent orchestration and LLM differ.
+
+```bash
+# Run the ADK agent
+PYTHONPATH=. python scripts/adk_query.py
+```
+
+**What's different from LangGraph:**
+
+| | LangGraph | Google ADK |
+|---|---|---|
+| Agent definition | ~80 lines — StateGraph, nodes, edges, routing | ~30 lines — `Agent()` with tools and instruction |
+| Tool-calling loop | Explicit — you wire the decide → call → return cycle | Implicit — ADK handles it internally |
+| Tool format | Anthropic schemas (`input_schema`) | Auto-generated from function docstrings and type hints |
+| Execution model | Synchronous — `graph.invoke()` blocks until done | Async — `runner.run_async()` streams events |
+| Observability | Langfuse tracing at every layer | ADK's built-in tracing |
+
+**Results (Gemini 3.5 Flash):**
+
+| Query type | Result |
+|---|---|
+| Factual extraction (Apple revenue) | ✅ Correct — $416,161M with citations |
+| Metadata lookup (available companies) | ✅ Correct — all 5 companies listed |
+| Unanswerable (Tesla) | ✅ Correctly refused |
+| Cross-company comparison | ⚠️ Intermittent — see findings below |
+
+**What I found during integration:**
+
+The ADK agent works for single-tool-call queries. Cross-company comparisons — where Claude makes two `search_documents` calls and synthesises — exposed three issues with Gemini's tool-calling behaviour:
+
+1. **Verbose system prompts cause over-calling.** Reusing Claude's system prompt made Gemini call `search_documents` 4-6 times per company instead of once. A shorter, Gemini-specific instruction fixed this. The same prompt doesn't transfer across models — context engineering is model-specific.
+
+2. **Gemini doesn't self-regulate tool usage.** Even with explicit instructions ("search once per company"), Gemini kept making redundant calls. Claude follows these constraints precisely. This led to adding a `compare_companies` tool that searches both companies internally in a single call — unnecessary for Claude, required for Gemini.
+
+3. **Accumulated tool results cause API disconnects.** Multiple tool calls produce ~12,000+ chars of conversation history. Gemini's API disconnects during the final synthesis turn when context grows this large. Truncating tool output to 3,000 chars per call and reducing tool call count mitigates this. Testing over VPN (due to regional API restrictions) likely contributed to connection instability, as longer requests are more sensitive to VPN routing latency and timeouts.
+
+**Conclusion:** ADK's simplicity (30 lines vs 80) comes with less control over the tool-calling loop. LangGraph's explicit graph gives you visibility into every decision and the ability to constrain agent behaviour precisely. For production financial analysis, LangGraph with Claude remains the primary choice. ADK demonstrates framework portability — the same tools and RAG pipeline work across both, with model-specific prompt tuning.
+
 ## Test Coverage
 
 23 tests + 1 smoke test + 5 eval tests, all passing.
@@ -218,6 +262,7 @@ The API returns a `trace_id` with each response for direct lookup in the Langfus
 **Prerequisites**
 - Python 3.11+
 - Anthropic API key (for Claude backend)
+- Google API key (for ADK/Gemini comparison)
 - Langfuse account (free tier, for tracing)
 - Ollama (optional, for local model backend)
 
@@ -233,6 +278,7 @@ pip install -r requirements.txt
 **Environment variables**
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
+export GOOGLE_API_KEY="AIzaSy..."
 export LANGFUSE_PUBLIC_KEY="pk-..."
 export LANGFUSE_SECRET_KEY="sk-..."
 export LANGFUSE_HOST="https://us.cloud.langfuse.com"
@@ -275,6 +321,9 @@ PYTHONPATH=. pytest tests/evals -m eval -v -s
 
 # Eval runner standalone (prints summary table)
 PYTHONPATH=. python src/evals/runner.py
+
+# ADK agent (requires GOOGLE_API_KEY + ingested data)
+PYTHONPATH=. python scripts/adk_query.py
 ```
 
 **Docker**
@@ -297,10 +346,10 @@ docker run -p 8000:8000 \
 - Single embedding model — all-MiniLM-L6-v2 is a prototyping choice, not production-grade
 - No hybrid search — pure vector search can miss exact keyword matches (acronyms, ticker symbols)
 - pypdf struggles with chart-heavy PDFs (Sony annual report) — encoded figures are flattened, reducing accuracy on table/chart extraction queries
+- Gemini API disconnects on multi-turn tool conversations — cross-company comparisons via ADK require the `compare_companies` workaround tool
 
 **Planned extensions**
 - Sliding window memory for conversational follow-up queries
 - Reflexion/self-critique node — second LLM pass to verify answer is grounded in sources, critical for financial accuracy
-- Google ADK comparison — rebuild one agent flow in ADK to demonstrate framework flexibility
 - Hybrid search (vector + BM25 keyword) via reciprocal rank fusion
 - Upgrade PDF extraction to pdfplumber or unstructured.io for layout-aware parsing
