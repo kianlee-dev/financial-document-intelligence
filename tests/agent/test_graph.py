@@ -10,6 +10,7 @@ import src.agent.graph as graph
 import src.agent.tools as tools
 
 
+
 def _tool_use(block_id, name, inp):
     return SimpleNamespace(type="tool_use", id=block_id, name=name, input=inp)
 
@@ -139,3 +140,108 @@ def test_run_missing_company(monkeypatch):
     assert "Tesla" in answer["response"]
     assert "not available" in answer["response"]
     assert fake_llm.generate_with_tools.call_count == 2
+
+def test_run_reflexion_grounded_passthrough(monkeypatch):
+    fake = MagicMock()
+    fake.search.return_value = [_doc()]
+    monkeypatch.setattr(tools, "_store", fake)
+
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools.side_effect = [
+        SimpleNamespace(content=[_tool_use("u1", "search_documents", {"query": "net sales"})]),
+        SimpleNamespace(content=[_text("Apple net sales were 391B.")]),
+    ]
+    monkeypatch.setattr(graph, "_llm", fake_llm)
+    monkeypatch.setattr(graph, "verify", lambda query, answer, chunks: {
+        "verdict": {"grounded": True, "flagged_claims": []},
+        "response": "Apple net sales were 391B."
+    })
+
+    answer = graph.run("What were Apple net sales?", reflexion=True)
+    assert answer["grounded"]==True and not answer["flagged_claims"]
+    assert "Apple net sales" in answer["response"]
+
+def test_run_reflexion_ungrounded_passthrough(monkeypatch):
+    fake = MagicMock()
+    fake.search.return_value = [_doc()]
+    monkeypatch.setattr(tools, "_store", fake)
+
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools.side_effect = [
+        SimpleNamespace(content=[_tool_use("u1", "search_documents", {"query": "net sales"})]),
+        SimpleNamespace(content=[_text("Apple net sales were 400B.")]),
+    ]
+    monkeypatch.setattr(graph, "_llm", fake_llm)
+    monkeypatch.setattr(graph, "verify", lambda query, answer, chunks: {
+        "verdict": {"grounded": False, "flagged_claims": [{"claim": "Apple net sales were 400B", "reason": "Sources show 391B, not 400B"}]},
+        "response": "Apple net sales were 391B."
+    })
+
+    answer = graph.run("What were Apple net sales?", reflexion=True)
+    assert answer["grounded"]==False and answer["flagged_claims"]
+    assert "391B" in answer["response"]
+
+def test_run_reflexion_metadata_skip(monkeypatch):
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools.side_effect = [
+        SimpleNamespace(content=[_tool_use("u2", "get_metadata", {})]),
+        SimpleNamespace(content=[_text("Apple, HSBC, JPMorgan")]),
+    ]
+    monkeypatch.setattr(graph, "_llm", fake_llm)
+    fake_verify = MagicMock()
+    monkeypatch.setattr(graph, "verify", fake_verify)
+    monkeypatch.setattr(tools, "get_documents_list", lambda: [{"company_name": "Apple", "report_year": 2025, "document_type": "10-K"}])
+    answer = graph.run("What company data are available?", reflexion=True)
+    assert answer["grounded"] == True 
+    assert fake_verify.call_count == 0
+
+def test_malformed_json(monkeypatch):
+    fake = MagicMock()
+    fake.search.return_value = [_doc()]
+    monkeypatch.setattr(tools, "_store", fake)
+
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools.side_effect = [
+        SimpleNamespace(content=[_tool_use("u1", "search_documents", {"query": "net sales"})]),
+        SimpleNamespace(content=[_text("Apple net sales were 391B.")]),
+    ]
+    monkeypatch.setattr(graph, "_llm", fake_llm)
+
+def test_run_reflexion_false(monkeypatch):
+    fake = MagicMock()
+    fake.search.return_value = [_doc()]
+    monkeypatch.setattr(tools, "_store", fake)
+
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools.side_effect = [
+        SimpleNamespace(content=[_tool_use("u1", "search_documents", {"query": "net sales"})]),
+        SimpleNamespace(content=[_text("Apple net sales were 400B.")]),
+    ]
+    monkeypatch.setattr(graph, "_llm", fake_llm)
+    fake_verify = MagicMock()
+    monkeypatch.setattr(graph, "verify", fake_verify)
+
+    answer = graph.run("What were Apple net sales?", reflexion=False)
+    assert fake_verify.call_count == 0
+
+
+def test_run_reflexion_environment(monkeypatch):
+    fake = MagicMock()
+    fake.search.return_value = [_doc()]
+    monkeypatch.setattr(tools, "_store", fake)
+
+    fake_llm = MagicMock()
+    fake_llm.generate_with_tools.side_effect = [
+        SimpleNamespace(content=[_tool_use("u1", "search_documents", {"query": "net sales"})]),
+        SimpleNamespace(content=[_text("Apple net sales were 400B.")]),
+    ]
+    monkeypatch.setattr(graph, "_llm", fake_llm)
+    monkeypatch.setattr(graph, "verify", lambda query, answer, chunks: {
+        "verdict": {"grounded": False, "flagged_claims": [{"claim": "Apple net sales were 400B", "reason": "Sources show 391B, not 400B"}]},
+        "response": "Apple net sales were 391B."
+    })
+    monkeypatch.setenv("REFLEXION_ENABLED", "true")
+
+    answer = graph.run("What were Apple net sales?")
+    assert answer["grounded"]==False and answer["flagged_claims"]
+    assert "391B" in answer["response"]
