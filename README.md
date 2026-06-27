@@ -1,6 +1,6 @@
 # Financial Document Intelligence
 
-An AI agent that ingests financial reports, stores them in a vector database, and answers questions with citations. Built with a LangGraph tool-calling agent over a RAG pipeline, evaluated with an LLM-as-judge suite, traced through Langfuse, and served via FastAPI. Supports swappable LLM backends (Claude API or local models via Ollama/vLLM) and includes a Google ADK comparison agent. Covers annual reports and SEC filings across multiple markets (US, UK, HK, JP).
+An AI agent that ingests financial reports, stores them in a vector database, and answers questions with citations. Built with a LangGraph tool-calling agent over a RAG pipeline, with a reflexion node that verifies answer grounding before responding. Evaluated with an LLM-as-judge suite, traced through Langfuse, and served via FastAPI. Supports swappable LLM backends (Claude API or local models via Ollama/vLLM) and includes a Google ADK comparison agent. Covers annual reports and SEC filings across multiple markets (US, UK, HK, JP).
 
 ## Project Structure
 ```
@@ -14,7 +14,8 @@ financial-document-intelligence/
 │   │   └── vectorstore.py     # ChromaDB — storage, similarity search, deletion
 │   ├── agent/
 │   │   ├── tools.py           # Tool implementations, Anthropic schemas, dispatch registry
-│   │   └── graph.py           # LangGraph StateGraph — nodes, routing, run()
+│   │   ├── graph.py           # LangGraph StateGraph — nodes, routing, reflexion, run()
+│   │   └── reflexion.py       # Grounding verification — auditor prompt, verdict + correction
 │   ├── agent_adk/
 │   │   └── agent.py           # Google ADK agent — async tool wrappers, Gemini-specific prompt
 │   ├── context/
@@ -37,7 +38,8 @@ financial-document-intelligence/
 ├── tests/
 │   ├── agent/
 │   │   ├── test_tools.py      # 11 tests — filters, search, metadata, schemas
-│   │   ├── test_graph.py      # 7 tests — routing, dispatch, multi-turn, edge cases
+│   │   ├── test_graph.py      # 13 tests — routing, dispatch, multi-turn, reflexion, edge cases
+│   │   ├── test_reflexion.py  # 1 test — verify() fallback on malformed JSON
 │   │   └── test_smoke.py      # 1 test — real API end-to-end, skippable
 │   └── evals/
 │       └── test_eval_suite.py # 5 threshold tests — relevance, accuracy, faithfulness, precision, hallucinations
@@ -51,20 +53,22 @@ financial-document-intelligence/
 ## Architecture
 ```
                          ┌──── tool call ────→ [Tools Node] ───┐
-                         │                     search_documents │
-                         │                     get_metadata      │
+                         │                    search_documents │
+                         │                     get_metadata    │
 User Query → [FastAPI] → [Agent Node] ◄────────────────────────┘
                          │
-                         └──── final answer ──→ [Response + Citations]
-                                                       │
-                                               ┌───────┴───────┐
-                                               │               │
-                                        [Langfuse Trace]  [Return to User]
+                         └──── final answer ──→ [Reflexion Node] ──→ [Response + Citations]
+                                                       │                      │
+                                                 verify grounding      ┌──────┴──────┐
+                                                 flag claims           │             │
+                                                 correct answer  [Langfuse Trace] [Return to User]
 ```
 
-The agent sits on top of a standard RAG pipeline. Instead of a fixed retrieve → generate chain, the LangGraph agent decides what to search, how many times, and when it has enough information to answer.
+The agent sits on top of a standard RAG pipeline. Instead of a fixed retrieve → generate chain, the LangGraph agent decides what to search, how many times, and when it has enough information to answer. Before the answer reaches the user, a reflexion node verifies that every claim is grounded in the retrieved sources.
 
 **Why the agent matters:** A fixed chain can only do one retrieval per query. The agent calls `search_documents` multiple times with different filters — when asked to compare HSBC and JPMorgan, it searches each company separately, then synthesises the results. That cross-company comparison is impossible with a fixed chain.
+
+**Why the reflexion node matters:** The eval suite showed the agent's faithfulness score at 4.27/5 — meaning some answers contained claims not grounded in retrieved chunks. For financial documents, an ungrounded revenue figure is worse than no answer. The reflexion node catches these before they reach the user, improving faithfulness to 4.9/5 (see Evaluation Suite).
 
 ## Component Responsibilities
 
@@ -72,7 +76,7 @@ The agent sits on top of a standard RAG pipeline. Instead of a fixed retrieve �
 |--------|---------------|---------------|
 | `ingestion/` | PDF loading and chunking | Separated from retrieval — ingestion runs once, retrieval runs per query |
 | `retrieval/` | Embedding and vector search | Storage and search logic testable independently of agent |
-| `agent/` | Tool-calling decision loop | Agent orchestrates retrieval without knowing storage internals |
+| `agent/` | Tool-calling decision loop + reflexion | Agent orchestrates retrieval without knowing storage internals; reflexion verifies grounding |
 | `agent_adk/` | Google ADK comparison agent | Same tools and RAG pipeline, different framework — demonstrates portability |
 | `context/` | Prompt assembly | What goes into the prompt is separate from how it gets sent |
 | `llm/` | LLM backend abstraction | Factory pattern — swap Claude for Ollama/vLLM via environment variable |
@@ -83,6 +87,9 @@ The agent sits on top of a standard RAG pipeline. Instead of a fixed retrieve �
 
 **Tool-calling agent, not ReAct or multi-agent**
 ReAct agents reason in free-form loops which is unpredictable iteration counts, harder to debug. Multi-agent architectures add orchestration complexity without benefit at this scale. Tool-calling gives structured, predictable behavior: the model either calls a defined tool or gives a final answer. Each decision is visible in Langfuse traces.
+
+**Reflexion node — flag-then-fix, not silent rewrite**
+A silent rewrite hides what was changed and why. The entire observability setup — Langfuse tracing, per-query scoring, dashboard filtering — was built to answer "where exactly did the pipeline fail." The reflexion node returns a structured verdict (which claims are ungrounded and why) alongside a corrected response, producing three data points per query: original answer, verdict, and corrected answer. A single LLM call returns both verdict and correction in one JSON object — one extra API call per query regardless of outcome. The node always uses `AnthropicClient` directly (bypassing the `LLMClient` factory), matching the eval judge pattern — a verifier must be more reliable than the thing it verifies. Skips automatically when `retrieved_chunks` is empty (metadata queries), toggled via `REFLEXION_ENABLED` environment variable or `build_graph(reflexion=True/False)` parameter.
 
 **Raw Anthropic SDK, not LangChain ChatAnthropic**
 `AnthropicClient` wraps the raw `anthropic` SDK directly. This avoids locking the agent into LangChain's model abstraction. A parallel `OpenAIClient` wraps the OpenAI SDK for Ollama/vLLM compatibility. Both expose identical `generate()` and `generate_with_tools()` interfaces. The factory class (`LLMClient`) routes to the correct backend via the `LLM_BACKEND` environment variable — the agent graph doesn't know which backend is active.
@@ -100,10 +107,10 @@ Document metadata (company, year, type) is stored in ChromaDB alongside each chu
 Financial text mixes narrative paragraphs with dense tables. 2000 characters is roughly 1–2 paragraphs which is small enough for topically focused embeddings, but large enough to be self-contained. 400-character overlap (20%) prevents information loss at chunk boundaries. Fixed-size splitting would break mid-sentence; semantic splitting adds embedding overhead during ingestion without proportional benefit.
 
 **Labelled chunk formatting for citations**
-Each chunk in the prompt is wrapped with `[Source: company, type, year, Page N]`. The LLM reads these labels and cites them in answers. Raw text would make citation impossible; structured XML adds parsing complexity without benefit at this scale.
+Each chunk in the prompt is wrapped with `[Source: company, type, year, Page N]`. The LLM reads these labels and cites them in answers. The reflexion node verifies claims against these same labelled chunks. Raw text would make citation impossible; structured XML adds parsing complexity without benefit at this scale.
 
 **Additive reducer on messages state**
-LangGraph's `Annotated[list, operator.add]` ensures each node appends to the messages list rather than replacing it. Without this, each node would overwrite previous messages — the agent would lose its tool call history mid-loop.
+LangGraph's `Annotated[list, operator.add]` ensures each node appends to the messages list rather than replacing it. Without this, each node would overwrite previous messages — the agent would lose its tool call history mid-loop. The same reducer pattern is used for `retrieved_chunks` in state, which accumulates across multiple `search_documents` calls (critical for cross-company comparisons).
 
 ## API Endpoints
 
@@ -121,13 +128,15 @@ LangGraph's `Annotated[list, operator.add]` ensures each node appends to the mes
 
 **Results (35 test cases, 5 companies)**
 
-| Metric | Score | Threshold | Status |
-|--------|-------|-----------|--------|
-| Relevance | 4.97/5 | ≥ 3.5 | ✅ Pass |
-| Accuracy | 4.68/5 | ≥ 3.5 | ✅ Pass |
-| Faithfulness | 4.27/5 | ≥ 3.5 | ✅ Pass |
-| Retrieval Precision@3 | 0.97 | ≥ 0.7 | ✅ Pass |
-| Hallucinations | 0 | 0 | ✅ Pass |
+| Metric | Without Reflexion | With Reflexion | Threshold | Change |
+|--------|-------------------|----------------|-----------|--------|
+| Relevance | 4.97/5 | 4.9/5 | ≥ 3.5 | -0.07 |
+| Accuracy | 4.68/5 | 4.5/5 | ≥ 3.5 | -0.18 |
+| Faithfulness | 4.27/5 | **4.9/5** | ≥ 3.5 | **+0.63** |
+| Retrieval Precision@3 | 0.97 | 0.98 | ≥ 0.7 | +0.01 |
+| Hallucinations | 0 | 0 | 0 | — |
+
+The reflexion node was built specifically to address the faithfulness gap — 4.27/5 meant some agent answers contained claims not grounded in retrieved sources. With reflexion enabled, faithfulness improved to 4.9/5. The slight accuracy dip (4.68 → 4.5) is attributed to the reflexion node occasionally stripping claims that were accurate but not explicitly stated in the retrieved chunks — a conservative trade-off appropriate for financial documents where unverifiable claims are worse than incomplete answers.
 
 **Test categories**
 
@@ -164,9 +173,11 @@ LLM_BACKEND=openai LOCAL_MODEL=qwen2.5:14b PYTHONPATH=. python scripts/agent_que
 
 **Cloud vs local quality:** Claude Sonnet scores 4.68/5 accuracy on the eval suite with correct citations. Qwen 2.5 14B successfully calls tools and completes the agent loop, but produces lower quality answers — wrong figures, missed cross-company retrievals, occasional wrong-language responses. The quality gap is expected; local models serve air-gapped deployments where data isolation is the priority, not answer quality parity. In production on GPU servers, vLLM replaces Ollama with the same `OpenAIClient` code — only `base_url` changes.
 
+**Backend-independent verification:** Both the eval judge and the reflexion node use `AnthropicClient` directly, bypassing the factory. This ensures consistent scoring and grounding verification regardless of which backend the agent uses — the quality of verification should never degrade with the agent's model choice.
+
 ## Google ADK Comparison
 
-The same RAG pipeline rebuilt with Google's Agent Development Kit to compare framework patterns. Uses the same ChromaDB, same retrieval logic, same tools — only the agent orchestration and LLM differ.
+The same RAG pipeline rebuilt with Google's Agent Development Kit to compare framework patterns. Uses the same ChromaDB, same retrieval logic, same tools — only the agent orchestration and LLM differ. This demonstrates framework portability: the underlying RAG pipeline, tools, and evaluation suite are framework-agnostic, with only the orchestration layer and model-specific prompt tuning varying between implementations.
 
 ```bash
 # Run the ADK agent
@@ -182,6 +193,7 @@ PYTHONPATH=. python scripts/adk_query.py
 | Tool format | Anthropic schemas (`input_schema`) | Auto-generated from function docstrings and type hints |
 | Execution model | Synchronous — `graph.invoke()` blocks until done | Async — `runner.run_async()` streams events |
 | Observability | Langfuse tracing at every layer | ADK's built-in tracing |
+| Reflexion/verification | Custom node in graph — toggleable, traceable | Would require post-processing — no native graph control |
 
 **Results (Gemini 3.5 Flash):**
 
@@ -202,11 +214,11 @@ The ADK agent works for single-tool-call queries. Cross-company comparisons — 
 
 3. **Accumulated tool results cause API disconnects.** Multiple tool calls produce ~12,000+ chars of conversation history. Gemini's API disconnects during the final synthesis turn when context grows this large. Truncating tool output to 3,000 chars per call and reducing tool call count mitigates this. Testing over VPN (due to regional API restrictions) likely contributed to connection instability, as longer requests are more sensitive to VPN routing latency and timeouts.
 
-**Conclusion:** ADK's simplicity (30 lines vs 80) comes with less control over the tool-calling loop. LangGraph's explicit graph gives you visibility into every decision and the ability to constrain agent behaviour precisely. For production financial analysis, LangGraph with Claude remains the primary choice. ADK demonstrates framework portability — the same tools and RAG pipeline work across both, with model-specific prompt tuning.
+**Conclusion:** ADK's simplicity (30 lines vs 80) comes with less control over the tool-calling loop. LangGraph's explicit graph gives you visibility into every decision and the ability to constrain agent behaviour precisely — the reflexion node is a direct example of this, as it would be difficult to insert a verification step into ADK's implicit loop. For production financial analysis, LangGraph with Claude remains the primary choice. ADK demonstrates framework portability — the same tools and RAG pipeline work across both, with model-specific prompt tuning.
 
 ## Test Coverage
 
-23 tests + 1 smoke test + 5 eval tests, all passing.
+30 tests + 1 smoke test + 5 eval tests, all passing.
 
 **Tool tests**
 
@@ -231,6 +243,17 @@ The ADK agent works for single-tool-call queries. Cross-company comparisons — 
 | `test_run_direct_answer` | Direct answer without tool call, exactly 1 LLM call |
 | `test_run_cross_company_comparison` | Agent calls search twice with different filters, 3 LLM calls |
 | `test_run_missing_company` | Agent handles empty search results gracefully |
+| `test_run_reflexion_grounded_passthrough` | Reflexion verifies grounded answer, passes through unchanged |
+| `test_run_reflexion_ungrounded_correction` | Reflexion flags ungrounded claims, returns corrected response |
+| `test_run_reflexion_metadata_skip` | Reflexion skips when no retrieved chunks (metadata queries) |
+| `test_run_reflexion_false` | Reflexion disabled — verify() never called |
+| `test_run_reflexion_environment` | REFLEXION_ENABLED env var activates reflexion node |
+
+**Reflexion tests**
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_verify_json_parse_failure_fallback` | Malformed LLM output triggers safe fallback — original answer preserved |
 
 **Smoke test**
 
@@ -250,12 +273,13 @@ The ADK agent works for single-tool-call queries. Cross-company comparisons — 
 
 ## Observability
 
-Every query is traced through Langfuse at three levels:
+Every query is traced through Langfuse at four levels:
 - **Retrieval** — query, results, latency
 - **Context assembly** — formatted prompt
 - **LLM calls** — prompt, completion, tokens
+- **Reflexion** — original answer, verdict (grounded/flagged claims), corrected response
 
-The API returns a `trace_id` with each response for direct lookup in the Langfuse dashboard. Evaluation scores (relevance, accuracy, faithfulness) are attached to traces via the Langfuse SDK, enabling filtered analysis of low-scoring queries.
+The API returns a `trace_id` with each response for direct lookup in the Langfuse dashboard. Evaluation scores (relevance, accuracy, faithfulness) are attached to traces via the Langfuse SDK, enabling filtered analysis of low-scoring queries. With reflexion enabled, traces show the full verification chain — when the reflexion node flags ungrounded claims, the trace contains both the original and corrected answers alongside the specific claims and reasons, making it possible to diagnose exactly what the agent fabricated and why.
 
 ## How to Run
 
@@ -282,6 +306,9 @@ export GOOGLE_API_KEY="AIzaSy..."
 export LANGFUSE_PUBLIC_KEY="pk-..."
 export LANGFUSE_SECRET_KEY="sk-..."
 export LANGFUSE_HOST="https://us.cloud.langfuse.com"
+
+# Optional — enable reflexion node (default: false)
+export REFLEXION_ENABLED="true"
 ```
 
 **Add documents**
@@ -316,7 +343,7 @@ PYTHONPATH=. pytest tests/agent -m "not smoke"
 # Smoke test (requires API key + ingested data)
 PYTHONPATH=. pytest tests/agent/test_smoke.py -m smoke
 
-# Evaluation suite (requires API key + ingested data, ~$3 per run)
+# Evaluation suite (requires API key + ingested data, ~$3-5 per run depending on reflexion)
 PYTHONPATH=. pytest tests/evals -m eval -v -s
 
 # Eval runner standalone (prints summary table)
@@ -335,6 +362,7 @@ docker run -p 8000:8000 \
   -e LANGFUSE_PUBLIC_KEY=$LANGFUSE_PUBLIC_KEY \
   -e LANGFUSE_SECRET_KEY=$LANGFUSE_SECRET_KEY \
   -e LANGFUSE_HOST=$LANGFUSE_HOST \
+  -e REFLEXION_ENABLED=true \
   financial-document-intelligence
 ```
 
@@ -347,9 +375,11 @@ docker run -p 8000:8000 \
 - No hybrid search — pure vector search can miss exact keyword matches (acronyms, ticker symbols)
 - pypdf struggles with chart-heavy PDFs (Sony annual report) — encoded figures are flattened, reducing accuracy on table/chart extraction queries
 - Gemini API disconnects on multi-turn tool conversations — cross-company comparisons via ADK require the `compare_companies` workaround tool
+- Reflexion adds ~3-5 seconds latency per query — acceptable for batch analysis, noticeable for interactive use
 
 **Planned extensions**
 - Sliding window memory for conversational follow-up queries
-- Reflexion/self-critique node — second LLM pass to verify answer is grounded in sources, critical for financial accuracy
 - Hybrid search (vector + BM25 keyword) via reciprocal rank fusion
 - Upgrade PDF extraction to pdfplumber or unstructured.io for layout-aware parsing
+- Use a faster model (Haiku) for the reflexion verification call to reduce per-query latency
+- Tune the reflexion prompt to reduce false positives on accuracy — currently strips some claims that are reasonable inferences from source data

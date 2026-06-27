@@ -190,17 +190,15 @@
 
 **Reasoning:** Structured tool calls give predictable, debuggable behavior; the agent either calls a defined tool or gives a final answer. More controlled than ReAct (no unpredictable looping), simpler than multi-agent (overkill for this scale). Tool schemas constrain output format, which helps enforce citation requirements for financial documents.
 
-**Future work:** Add reflexion/self-critique node — a second LLM pass that verifies the answer is grounded in retrieved sources and flags potential hallucinated figures. Critical for financial accuracy. Designed as a toggleable node in the state graph.
-
 ---
 
 ### 3.2 State Definition
 
 What goes in the agent's TypedDict state
 
-**Design Decision (which fields and why):** Minimal — `messages: list` only, following LangGraph's standard pattern.
+**Design Decision (which fields and why):** Three fields — `messages: Annotated[list, operator.add]`, `retrieved_chunks: Annotated[list, operator.add]`, and `reflexion_verdict: dict`.
 
-**Reasoning:** Messages list tracks the full agent loop within a single query: the user's query, tool calls, tool results, and the final answer are all message types. All data flows through messages, so separate fields are redundant. This follows LangGraph's standard pattern. Additional fields added only if a specific need arises during development.
+**Reasoning:** `messages` tracks the full agent loop — user query, tool calls, tool results, and final answer. Additive reducer ensures each node appends rather than overwrites. `retrieved_chunks` accumulates formatted chunk strings from `search_documents` calls, providing a single source of truth used by both the reflexion node (for grounding verification) and `run()` (for the return dict). Previously extracted post-hoc by scanning messages in `run()` — moved to state to avoid duplicating extraction logic. Also uses additive reducer since cross-company comparisons produce multiple search calls. `reflexion_verdict` stores the structured verdict (grounded flag, flagged claims) set once by the reflexion node — plain dict, no reducer needed.
 
 ---
 
@@ -232,12 +230,39 @@ graph TD
     A[User Query] --> B[Agent Node]
     B -->|tool call| C[Tools Node]
     C --> B
-    B -->|final answer| D[END]
+    B -->|final answer| D[Reflexion Node]
+    D --> E[END]
 ```
-Flow: User query enters Agent node. Agent decides to either call a tool or give the final answer. If tool call, the Tools node executes it and returns the result to Agent. Agent re-evaluates: call another tool or answer. Loop continues until Agent responds without a tool call, which triggers END.
+
+Flow: User query enters Agent node. Agent decides to either call a tool or give the final answer. If tool call, the Tools node executes it and returns the result to Agent. Agent re-evaluates: call another tool or answer. Loop continues until Agent responds without a tool call. When reflexion is enabled, the answer passes to the Reflexion node for grounding verification before reaching END. When disabled, the agent routes directly to END.
 
 **Reasoning:** Agent is the sole decision-maker, deciding what tool to call and when it has enough information to answer. Simple two-node graph is debuggable via Langfuse traces and follows LangGraph's standard pattern.
 
+### 3.5 Reflexion / Self-Critique Node
+
+**Options:**
+- **No verification** — agent's answer goes directly to the user. Simple, fast, one fewer API call.
+- **Silent rewrite** — second LLM pass rewrites the answer if ungrounded claims are found. User always gets a clean answer, but the rewrite is invisible — no trace of what was changed or why.
+- **Flag-then-fix** — second LLM pass returns a structured verdict (which claims are ungrounded and why) alongside a corrected response. Separates judgment from action.
+
+**Design Decision:** Flag-then-fix via a single LLM call returning both a verdict and a corrected response.
+
+**Reasoning:** The eval suite showed faithfulness at 4.27/5 — some agent answers contain claims not grounded in retrieved chunks. For financial documents, an ungrounded revenue figure is worse than no answer. Silent rewrite hides diagnostic information — the full observability setup (Langfuse tracing, per-query scoring, dashboard filtering) was built to answer "where exactly did the pipeline fail," and a node that silently rewrites the answer defeats that. Flag-then-fix produces three data points per query: original answer, verdict (which claims, why), and corrected answer. A single LLM call returns both verdict and corrected response in one JSON object — grounded answers cost one call (verification confirms, original passes through unchanged), ungrounded answers also cost one call (verdict + correction together).
+
+**Verification model:** Always uses `AnthropicClient` directly, bypassing the `LLMClient` factory. Same reasoning as the eval judge — a verifier is only useful if it's more reliable than the thing it's verifying. If the agent runs on Qwen 2.5 14B via Ollama, the same model cannot reliably verify grounding. One additional API call per query, bounded cost.
+
+**Metadata query handling:** Reflexion skips when `retrieved_chunks` is empty. Metadata queries use `get_metadata` (not `search_documents`), so chunks are empty by design. Without this check, the reflexion node would flag every metadata response as ungrounded because there are no sources to verify against. Code-level skip, not prompt-level — deterministic and debuggable.
+
+**Toggle mechanism:** `build_graph(reflexion=None)`. `None` reads `REFLEXION_ENABLED` environment variable (default `"false"`). Explicit `True`/`False` overrides. Environment variable for production runtime config, parameter for tests and eval comparisons. Matches existing pattern with `LLM_BACKEND`.
+
+**State changes:** `AgentState` gains `retrieved_chunks: Annotated[list, operator.add]` (populated by `_tools_node` on `search_documents` calls) and `reflexion_verdict: dict` (set by the reflexion node). Retrieved chunks moved from post-hoc message scanning in `run()` to state — single source of truth used by both the reflexion node and `run()`.
+
+**Graph wiring:**
+Agent → (tool_use?) → Tools → Agent → (no tool_use?) → Reflexion → END
+
+**Eval results:** Faithfulness improved from 4.27/5 to 4.9/5 with reflexion enabled. Relevance and precision unchanged. Accuracy dipped slightly (4.68 → 4.5), likely due to the reflexion node stripping claims that were accurate but not explicitly stated in the retrieved chunks. Zero hallucinations in both runs.
+
+**Future work:** Use a faster model (Haiku) for the reflexion call to reduce per-query latency. Tune the verification prompt if accuracy continues to drop — the prompt may be too aggressive about flagging claims that are reasonable inferences from source data rather than direct quotes.
 ---
 
 ## 4. Context Engineering
@@ -482,10 +507,10 @@ PDF files → [pypdf loader] → [Minimal preprocessing] → [RecursiveCharacter
 User query → [FastAPI] → [LangGraph agent node] → decides tool call or final answer
 
 - If tool call → [Tools node] → search_documents (ChromaDB filtered similarity search) or get_metadata (ChromaDB unique docs) → result back to agent node → loop
-- If final answer → [Context assembly: labelled chunks with Source tags] → [Claude Sonnet via raw Anthropic SDK] → [Response + citations + Langfuse trace_id] → return to user
+- If final answer → [Reflexion node (when enabled): verify grounding against retrieved chunks, flag ungrounded claims, correct response] → [Response + citations + grounded flag + Langfuse trace_id] → return to user
 
 **Observability:** Every step traced through Langfuse — retrieval, context assembly, LLM calls. Trace ID returned in API response for dashboard lookup.
 
-**Final Reasoning:** Every component is separated by responsibility and swappable independently. pypdf can be replaced with a layout-aware extractor without touching retrieval. The embedding model is a one-line constructor change. ChromaDB can be swapped for Pinecone without touching the agent. The agent orchestrates retrieval without knowing storage internals. The LLM client abstracts the model provider — swapping Claude for vLLM is a config change. FastAPI is decoupled from agent logic. Langfuse traces every layer independently so failures can be diagnosed at the exact point they occur. The architecture is designed for a prototype that can evolve toward production by replacing individual components, not rewriting the system.
+**Final Reasoning:** Every component is separated by responsibility and swappable independently. pypdf can be replaced with a layout-aware extractor without touching retrieval. The embedding model is a one-line constructor change. ChromaDB can be swapped for Pinecone without touching the agent. The agent orchestrates retrieval without knowing storage internals. The LLM client abstracts the model provider — swapping Claude for vLLM is a config change. FastAPI is decoupled from agent logic. Langfuse traces every layer independently so failures can be diagnosed at the exact point they occur. The architecture is designed for a prototype that can evolve toward production by replacing individual components, not rewriting the system. The reflexion node sits between the agent's answer and the user — toggleable via environment variable, always verified by Claude regardless of agent backend, skipped for metadata queries.
 
 ---
