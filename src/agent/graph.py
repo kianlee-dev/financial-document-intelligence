@@ -18,10 +18,14 @@ from langgraph.graph import END, StateGraph
 from src.agent.tools import TOOL_REGISTRY, TOOL_SCHEMAS
 from src.context.prompt_builder import get_system_prompt
 from src.llm.client import LLMClient
+from src.agent.reflexion import verify
+import os
 
 
 class AgentState(TypedDict):
     messages: Annotated[list, operator.add]
+    retrieved_chunks: Annotated[list, operator.add]
+    reflexion_verdict: dict
 
 
 _llm: LLMClient | None = None
@@ -53,10 +57,13 @@ def _tools_node(state: AgentState) -> dict:
     """Execute every tool_use block in the last reply, return tool_result blocks."""
     last = state["messages"][-1]
     results = []
+    chunks_list = []
     for block in last["content"]:
         if _is_tool_use(block):
             try:
                 output = TOOL_REGISTRY[block.name](**block.input)
+                if block.name == "search_documents":
+                    chunks_list.append(output)
             except TypeError as e:
                 output = f"Tool call failed: {e}"
             results.append(
@@ -66,7 +73,24 @@ def _tools_node(state: AgentState) -> dict:
                     "content": output,
                 }
             )
-    return {"messages": [{"role": "user", "content": results}]}
+    return {"messages": [{"role": "user", "content": results}], "retrieved_chunks": chunks_list}
+
+@observe()
+def _reflexion_node(state: AgentState) -> dict:
+    chunks = state.get("retrieved_chunks", [])
+    if not chunks:
+        return {"messages": []}
+    last = state["messages"][-1]
+    texts = [
+        block.text
+        for block in last["content"]
+        if getattr(block, "type", None) == "text"
+    ]
+    answer = "\n".join(texts)
+    query = state["messages"][0]["content"]
+    result = verify(query, answer, chunks)
+    return {"messages": [{"role": "assistant", "content": result["response"]}], "reflexion_verdict": result["verdict"]}
+
 
 def _route(state: AgentState) -> str:
     """Continue to the tools node if the model requested a tool, else stop."""
@@ -76,45 +100,47 @@ def _route(state: AgentState) -> str:
     return END
 
 
-def build_graph():
+def build_graph(reflexion = None):
     """Build and compile the agent StateGraph."""
+    if reflexion is None:
+        reflexion = os.environ.get("REFLEXION_ENABLED", "false").lower() == "true"
     graph = StateGraph(AgentState)
     graph.add_node("agent", _agent_node)
     graph.add_node("tools", _tools_node)
     graph.set_entry_point("agent")
-    graph.add_conditional_edges("agent", _route, {"tools": "tools", END: END})
+    if reflexion:
+        graph.add_node("reflexion", _reflexion_node)
+        graph.add_conditional_edges("agent", _route, {"tools": "tools", END: "reflexion"})
+        graph.add_edge("reflexion", END)
+    else:
+        graph.add_conditional_edges("agent", _route, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
     return graph.compile()
 
 
 @observe()
-def run(query: str) -> dict:
+def run(query: str, reflexion = None) -> dict:
     """Run the agent on a single query and return the final answer text."""
     langfuse = get_client()
-    graph = build_graph()
+    graph = build_graph(reflexion)
     state = graph.invoke({"messages": [{"role": "user", "content": query}]})
     final = state["messages"][-1]
-    texts = [
-        block.text
-        for block in final["content"]
-        if getattr(block, "type", None) == "text"
-    ]
+    if isinstance(final["content"], str):
+        response_text = final["content"]
+    else:
+        texts = [
+            block.text
+            for block in final["content"]
+            if getattr(block, "type", None) == "text"
+        ]
+        response_text = "\n".join(texts)
 
     trace_id = langfuse.get_current_trace_id()
 
-    # Map tool_use IDs to names, collect content from search_documents results only
+    chunks = state.get("retrieved_chunks", [])
 
-    tool_map = {}
-    chunks = []
+    verdict = state.get("reflexion_verdict", {})
+    grounded = verdict.get("grounded", True)
+    flagged_claims = verdict.get("flagged_claims", [])
 
-    for message in state["messages"]:
-        if message["role"] == "assistant":
-            for block in message["content"]:
-                if _is_tool_use(block):
-                    tool_map[block.id] = block.name
-        elif message["role"] == "user" and isinstance(message["content"], list):
-            for block in message["content"]:
-                if block.get("type") == "tool_result":
-                    if tool_map.get(block["tool_use_id"]) == "search_documents":
-                        chunks.append(block["content"])
-    return {"response": "\n".join(texts), "trace_id": trace_id, "retrieved_chunks": chunks}
+    return {"response": response_text, "trace_id": trace_id, "retrieved_chunks": chunks, "grounded": grounded, "flagged_claims": flagged_claims}
