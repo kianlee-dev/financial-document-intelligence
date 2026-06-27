@@ -1,10 +1,9 @@
-from src.llm.client import LLMClient
 import json
 from src.llm.anthropic_client import AnthropicClient
 
 _llm = None
 
-def _get_llm() -> LLMClient:
+def _get_llm() -> AnthropicClient:
     """Lazily build a single LLMClient so import stays cheap and testable."""
     global _llm
     if _llm is None:
