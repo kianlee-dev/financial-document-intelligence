@@ -69,7 +69,14 @@ def test_search_documents_no_results(monkeypatch):
     assert tools.search_documents("nothing") == "No matching documents found."
 
 
-def test_get_metadata_lists_all_companies():
+def test_get_metadata_lists_all_companies(monkeypatch):
+    monkeypatch.setattr(tools, "get_documents_list", lambda: [
+        {"company_name": "Apple", "report_year": 2025, "document_type": "10-K"},
+        {"company_name": "JPMorgan Chase", "report_year": 2025, "document_type": "Annual Report"},
+        {"company_name": "HSBC", "report_year": 2025, "document_type": "Annual Report"},
+        {"company_name": "AIA Group", "report_year": 2025, "document_type": "Annual Report"},
+        {"company_name": "Sony", "report_year": 2025, "document_type": "Annual Report"},
+    ])
     md = tools.get_metadata()
     for company in ["Apple", "JPMorgan Chase", "HSBC", "AIA Group", "Sony"]:
         assert company in md
