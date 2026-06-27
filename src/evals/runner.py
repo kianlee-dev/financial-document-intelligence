@@ -11,7 +11,8 @@ def run_eval() -> dict:
     hallucinated_queries = []
     hallucinations = 0
 
-    for data in EVAL_DATASET:
+    dataset = EVAL_DATASET
+    for data in dataset:
         query = data["query"]
         expected = data["expected_answer"]
 
@@ -49,7 +50,7 @@ def run_eval() -> dict:
     avg_relevance = sum(s["relevance"] for s in score_list) / len(score_list)
     avg_accuracy = sum(s["accuracy"] for s in score_list) / len(score_list)
     # Exclude metadata_lookup — these use get_metadata tool, not search_documents, so retrieved_chunks is empty by design
-    faith_scores = [s["faithfulness"] for s, d in zip(score_list, EVAL_DATASET) if d["category"] != "metadata_lookup"]
+    faith_scores = [s["faithfulness"] for s, d in zip(score_list, dataset) if d["category"] != "metadata_lookup"]
     avg_faithfulness = sum(faith_scores) / len(faith_scores) if faith_scores else 0
     avg_precision = sum(precisions) / len(precisions) if precisions else 0
 
@@ -57,7 +58,7 @@ def run_eval() -> dict:
     print(f"\n{'='*80}")
     print(f"{'Query':<60} {'Rel':>4} {'Acc':>4} {'Fai':>4}")
     print(f"{'='*80}")
-    for data, scores in zip(EVAL_DATASET, score_list):
+    for data, scores in zip(dataset, score_list):
         q = data["query"][:57] + "..." if len(data["query"]) > 57 else data["query"]
         print(f"{q:<60} {scores['relevance']:>4} {scores['accuracy']:>4} {scores['faithfulness']:>4}")
     print(f"{'='*80}")
