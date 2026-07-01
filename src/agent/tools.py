@@ -6,9 +6,11 @@ the callables the tools node dispatches to.
 """
 
 from langfuse import observe
+from pathlib import Path
 
 from src.context.prompt_builder import format_chunks_with_sources
 from src.retrieval.vectorstore import VectorStore
+
 
 _store: VectorStore | None = None
 
@@ -16,7 +18,8 @@ def get_store() -> VectorStore:
     """Lazily build a single VectorStore so import stays cheap and testable."""
     global _store
     if _store is None:
-        _store = VectorStore()
+        project_root = Path(__file__).resolve().parent.parent.parent
+        _store = VectorStore(persist_dir=str(project_root / "chroma_db"))
     return _store
 
 def build_filters(company_name: str | list | None, report_year: int | None) -> dict | None:
